@@ -25,9 +25,28 @@
       backdrop-filter: blur(4px);
       border: 1px solid rgba(255, 255, 255, 0.1);
       z-index: 10;
-      pointer-events: none;
     }
+    #info-panel .no-pointer { pointer-events: none; }
     #loading {
+      color: #00ffcc;
+      font-weight: bold;
+    }
+    #controls {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    #controls label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+      color: #ccc;
+    }
+    #node-slider {
+      width: 260px;
+      cursor: pointer;
+    }
+    #node-count-value {
       color: #00ffcc;
       font-weight: bold;
     }
@@ -40,8 +59,14 @@
 <body>
 
   <div id="info-panel">
-    <div id="loading">Status: Loading graph data...</div>
-    <div id="stats"></div>
+    <div class="no-pointer">
+      <div id="loading">Status: Loading graph data...</div>
+      <div id="stats"></div>
+    </div>
+    <div id="controls" style="display:none;">
+      <label>Nodes shown: <span id="node-count-value">0</span> / <span id="node-count-total">0</span></label>
+      <input type="range" id="node-slider" min="1" max="1" value="1" />
+    </div>
   </div>
 
   <div id="3d-graph"></div>
@@ -49,6 +74,10 @@
   <script>
     const statusElem = document.getElementById('loading');
     const statsElem = document.getElementById('stats');
+    const controlsElem = document.getElementById('controls');
+    const sliderElem = document.getElementById('node-slider');
+    const countValueElem = document.getElementById('node-count-value');
+    const countTotalElem = document.getElementById('node-count-total');
     const startTime = performance.now();
 
     // Color generation per group
@@ -72,7 +101,7 @@
         statusElem.innerText = `Status: Processing rendering buffers... (${fetchTime}s fetch time)`;
 
         // 1. Unpack compact JSON nodes: [id, x, y, z, group]
-        const nodes = data.nodes.map(n => ({
+        const allNodes = data.nodes.map(n => ({
           id: n[0],
           fx: n[1],
           fy: n[2],
@@ -81,15 +110,21 @@
         }));
 
         // 2. Unpack compact JSON links: [source, target, label]
-        const links = data.links.map(l => ({
+        const allLinks = data.links.map(l => ({
           source: l[0],
           target: l[1],
           label: l[2]
         }));
 
-        // 3. Initialize Graph with Sprites for Nodes and Links
+        const totalNodes = allNodes.length;
+        const totalLinks = allLinks.length;
+
+        // Build a lookup of node index by id, in original order (used as slider ordering).
+        const nodeIndexById = new Map();
+        allNodes.forEach((n, i) => nodeIndexById.set(n.id, i));
+
+        // 3. Initialize Graph
         const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
-          .graphData({ nodes, links })
           .nodeResolution(4)
           .nodeRelSize(2)
           .nodeColor(node => node.color)
@@ -97,14 +132,14 @@
           .linkWidth(0.5)
           .cooldownTicks(0)
           .enableNodeDrag(false)
-          
+
           // --- NODE LABELS (ID rendered on/above the bubble) ---
           .nodeThreeObjectExtend(true)
           .nodeThreeObject(node => {
             const sprite = new SpriteText(node.id);
             sprite.color = '#ffffff';
-            sprite.textHeight = 4; // Adjust size relative to WebGL space
-            sprite.position.y = 4;  // Position slightly above the node center
+            sprite.textHeight = 4;
+            sprite.position.y = 4;
             return sprite;
           })
 
@@ -117,21 +152,48 @@
             return sprite;
           })
           .linkPositionUpdate((sprite, { start, end }) => {
-            // Calculate midpoint of the relationship line
             const middlePos = Object.assign(...['x', 'y', 'z'].map(c => ({
-              [c]: start[c] + (end[c] - start[c]) / 2 
+              [c]: start[c] + (end[c] - start[c]) / 2
             })));
             Object.assign(sprite.position, middlePos);
           });
 
+        function updateGraph(nodeCount) {
+          const n = Math.max(1, Math.min(totalNodes, nodeCount | 0));
+          const nodesSubset = allNodes.slice(0, n);
+          const visibleIds = new Set(nodesSubset.map(node => node.id));
+          const linksSubset = allLinks.filter(l => visibleIds.has(l.source) && visibleIds.has(l.target));
+
+          Graph.graphData({ nodes: nodesSubset, links: linksSubset });
+
+          countValueElem.textContent = n.toLocaleString();
+          statsElem.innerHTML = `
+            Nodes: <b>${nodesSubset.length.toLocaleString()}</b> / ${totalNodes.toLocaleString()}<br>
+            Links: <b>${linksSubset.length.toLocaleString()}</b> / ${totalLinks.toLocaleString()}
+          `;
+        }
+
+        // Configure slider: 1 .. totalNodes, default = min(1000, totalNodes)
+        const initialCount = Math.min(1000, totalNodes);
+        sliderElem.min = 1;
+        sliderElem.max = totalNodes;
+        sliderElem.value = initialCount;
+        countTotalElem.textContent = totalNodes.toLocaleString();
+        controlsElem.style.display = 'block';
+
+        // Debounce slider input so dragging doesn't thrash the renderer.
+        let sliderTimer = null;
+        sliderElem.addEventListener('input', () => {
+          countValueElem.textContent = (+sliderElem.value).toLocaleString();
+          clearTimeout(sliderTimer);
+          sliderTimer = setTimeout(() => updateGraph(+sliderElem.value), 120);
+        });
+
+        updateGraph(initialCount);
+
         const renderTime = ((performance.now() - startTime) / 1000).toFixed(2);
         statusElem.style.color = '#55ff55';
-        statusElem.innerText = 'Status: Render Complete';
-        statsElem.innerHTML = `
-          Nodes: <b>${nodes.length.toLocaleString()}</b><br>
-          Links: <b>${links.length.toLocaleString()}</b><br>
-          Load Time: <b>${renderTime}s</b>
-        `;
+        statusElem.innerText = `Status: Render Complete (${renderTime}s)`;
       })
       .catch(err => {
         statusElem.style.color = '#ff5555';
