@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>370k Node Graph - WebGL 3D Force Graph</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background-color: #050505;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #info-panel {
+      position: absolute;
+      top: 15px;
+      left: 15px;
+      color: #ffffff;
+      background: rgba(0, 0, 0, 0.75);
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+      backdrop-filter: blur(4px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      z-index: 10;
+      pointer-events: none;
+    }
+    #loading {
+      color: #00ffcc;
+      font-weight: bold;
+    }
+  </style>
+  <!-- Load 3d-force-graph from CDN -->
+  <script src="https://unpkg.com/3d-force-graph"></script>
+</head>
+<body>
+
+  <div id="info-panel">
+    <div id="loading">Status: Downloading & Parsing 370k dataset...</div>
+    <div id="stats"></div>
+  </div>
+
+  <div id="3d-graph"></div>
+
+  <script>
+    const statusElem = document.getElementById('loading');
+    const statsElem = document.getElementById('stats');
+    const startTime = performance.now();
+
+    // Map string/number group values to distinct visual hex colors
+    const colorMap = {};
+    function getGroupColor(group) {
+      if (!colorMap[group]) {
+        // Generate pseudo-random vibrant HSL colors per group
+        const hash = String(group).split('').reduce((a, b) => {
+          a = ((a << 5) - a) + b.charCodeAt(0);
+          return a & a;
+        }, 0);
+        const hue = Math.abs(hash) % 360;
+        colorMap[group] = `hsl(${hue}, 80%, 60%)`;
+      }
+      return colorMap[group];
+    }
+
+    fetch('graph_370k.json')
+      .then(res => res.json())
+      .then(data => {
+        const fetchTime = ((performance.now() - startTime) / 1000).toFixed(2);
+        statusElem.innerText = `Status: Processing WebGL buffers... (${fetchTime}s data load time)`;
+
+        // 1. Unpack compact array format back into JS objects
+        // Schema: [id, x, y, z, group]
+        const nodes = data.nodes.map(n => ({
+          id: n[0],
+          fx: n[1], // Pre-calculated fixed positions (prevents client CPU simulation)
+          fy: n[2],
+          fz: n[3],
+          color: getGroupColor(n[4])
+        }));
+
+        // Schema: [source, target]
+        const links = data.links.map(l => ({
+          source: l[0],
+          target: l[1]
+        }));
+
+        // 2. Initialize 3d-force-graph with 370k performance flags
+        const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
+          .graphData({ nodes, links })
+          // Lower geometry complexity per node to keep GPU memory low
+          .nodeResolution(4)
+          .nodeRelSize(1.5)
+          .nodeColor(node => node.color)
+          // Low link opacity to prevent WebGL visual clutter / oversaturation
+          .linkOpacity(0.08)
+          .linkWidth(0.5)
+          // Turn OFF client-side physics forces completely
+          .cooldownTicks(0)
+          .enableNodeDrag(false);
+
+        // 3. UI Status update
+        const renderTime = ((performance.now() - startTime) / 1000).toFixed(2);
+        statusElem.style.color = '#55ff55';
+        statusElem.innerText = 'Status: Render Complete';
+        statsElem.innerHTML = `
+          Nodes: <b>${nodes.length.toLocaleString()}</b><br>
+          Links: <b>${links.length.toLocaleString()}</b><br>
+          Load Time: <b>${renderTime}s</b>
+        `;
+      })
+      .catch(err => {
+        statusElem.style.color = '#ff5555';
+        statusElem.innerText = 'Error loading graph_370k.json file.';
+        console.error(err);
+      });
+  </script>
+</body>
+</html>
