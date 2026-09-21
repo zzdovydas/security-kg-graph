@@ -53,8 +53,10 @@
   </style>
 
   <!-- WebGL Library Dependencies -->
-  <script src="https://unpkg.com/3d-force-graph"></script>
-  <script src="https://unpkg.com/three-spritetext"></script>
+  <!-- three must load first so three-spritetext can find its global THREE -->
+  <script src="https://unpkg.com/three@0.149.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three-spritetext@1.8.2/dist/three-spritetext.min.js"></script>
+  <script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
 </head>
 <body>
 
