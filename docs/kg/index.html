@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>370k Node Graph - WebGL 3D Force Graph</title>
+  <title>3D Graph Visualization with Labels</title>
   <style>
     body {
       margin: 0;
@@ -17,7 +17,7 @@
       top: 15px;
       left: 15px;
       color: #ffffff;
-      background: rgba(0, 0, 0, 0.75);
+      background: rgba(0, 0, 0, 0.8);
       padding: 12px 16px;
       border-radius: 8px;
       font-size: 13px;
@@ -32,13 +32,15 @@
       font-weight: bold;
     }
   </style>
-  <!-- Load 3d-force-graph from CDN -->
+
+  <!-- WebGL Library Dependencies -->
   <script src="https://unpkg.com/3d-force-graph"></script>
+  <script src="https://unpkg.com/three-spritetext"></script>
 </head>
 <body>
 
   <div id="info-panel">
-    <div id="loading">Status: Downloading & Parsing 370k dataset...</div>
+    <div id="loading">Status: Loading graph data...</div>
     <div id="stats"></div>
   </div>
 
@@ -49,11 +51,10 @@
     const statsElem = document.getElementById('stats');
     const startTime = performance.now();
 
-    // Map string/number group values to distinct visual hex colors
+    // Color generation per group
     const colorMap = {};
     function getGroupColor(group) {
       if (!colorMap[group]) {
-        // Generate pseudo-random vibrant HSL colors per group
         const hash = String(group).split('').reduce((a, b) => {
           a = ((a << 5) - a) + b.charCodeAt(0);
           return a & a;
@@ -68,39 +69,61 @@
       .then(res => res.json())
       .then(data => {
         const fetchTime = ((performance.now() - startTime) / 1000).toFixed(2);
-        statusElem.innerText = `Status: Processing WebGL buffers... (${fetchTime}s data load time)`;
+        statusElem.innerText = `Status: Processing rendering buffers... (${fetchTime}s fetch time)`;
 
-        // 1. Unpack compact array format back into JS objects
-        // Schema: [id, x, y, z, group]
+        // 1. Unpack compact JSON nodes: [id, x, y, z, group]
         const nodes = data.nodes.map(n => ({
           id: n[0],
-          fx: n[1], // Pre-calculated fixed positions (prevents client CPU simulation)
+          fx: n[1],
           fy: n[2],
           fz: n[3],
           color: getGroupColor(n[4])
         }));
 
-        // Schema: [source, target]
+        // 2. Unpack compact JSON links: [source, target, label]
         const links = data.links.map(l => ({
           source: l[0],
-          target: l[1]
+          target: l[1],
+          label: l[2]
         }));
 
-        // 2. Initialize 3d-force-graph with 370k performance flags
+        // 3. Initialize Graph with Sprites for Nodes and Links
         const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
           .graphData({ nodes, links })
-          // Lower geometry complexity per node to keep GPU memory low
           .nodeResolution(4)
-          .nodeRelSize(1.5)
+          .nodeRelSize(2)
           .nodeColor(node => node.color)
-          // Low link opacity to prevent WebGL visual clutter / oversaturation
-          .linkOpacity(0.08)
+          .linkOpacity(0.2)
           .linkWidth(0.5)
-          // Turn OFF client-side physics forces completely
           .cooldownTicks(0)
-          .enableNodeDrag(false);
+          .enableNodeDrag(false)
+          
+          // --- NODE LABELS (ID rendered on/above the bubble) ---
+          .nodeThreeObjectExtend(true)
+          .nodeThreeObject(node => {
+            const sprite = new SpriteText(node.id);
+            sprite.color = '#ffffff';
+            sprite.textHeight = 4; // Adjust size relative to WebGL space
+            sprite.position.y = 4;  // Position slightly above the node center
+            return sprite;
+          })
 
-        // 3. UI Status update
+          // --- LINK LABELS (Relationship text rendered along the edge) ---
+          .linkThreeObjectExtend(true)
+          .linkThreeObject(link => {
+            const sprite = new SpriteText(link.label);
+            sprite.color = 'rgba(200, 200, 200, 0.85)';
+            sprite.textHeight = 2.5;
+            return sprite;
+          })
+          .linkPositionUpdate((sprite, { start, end }) => {
+            // Calculate midpoint of the relationship line
+            const middlePos = Object.assign(...['x', 'y', 'z'].map(c => ({
+              [c]: start[c] + (end[c] - start[c]) / 2 
+            })));
+            Object.assign(sprite.position, middlePos);
+          });
+
         const renderTime = ((performance.now() - startTime) / 1000).toFixed(2);
         statusElem.style.color = '#55ff55';
         statusElem.innerText = 'Status: Render Complete';
