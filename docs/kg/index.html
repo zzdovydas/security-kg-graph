@@ -50,6 +50,56 @@
       color: #00ffcc;
       font-weight: bold;
     }
+    #search-row {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.15);
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    #search-input {
+      flex: 1;
+      min-width: 180px;
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 12px;
+      outline: none;
+    }
+    #search-input:focus { border-color: #00ffcc; }
+    #search-input::placeholder { color: rgba(255, 255, 255, 0.4); }
+    #kg-llm-link {
+      display: inline-block;
+      margin-bottom: 10px;
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .btn {
+      background: rgba(0, 255, 204, 0.15);
+      color: #00ffcc;
+      border: 1px solid rgba(0, 255, 204, 0.4);
+      border-radius: 4px;
+      padding: 4px 10px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn:hover { background: rgba(0, 255, 204, 0.28); }
+    .btn.secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: #ccc;
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+    #search-status {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #ffaa66;
+      min-height: 14px;
+    }
   </style>
 
   <!-- WebGL Library Dependencies -->
@@ -61,13 +111,28 @@
 <body>
 
   <div id="info-panel">
+    <a id="kg-llm-link" class="btn" href="http://78.56.225.99:5123" target="_blank" rel="noopener noreferrer">KG LLM Prompting ↗</a>
     <div class="no-pointer">
       <div id="loading">Status: Loading graph data...</div>
       <div id="stats"></div>
+      <div id="legend" style="margin-top:8px; font-size:12px; display:flex; gap:12px; flex-wrap:wrap;">
+        <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#992f35; vertical-align:middle; margin-right:4px;"></span>CVE</span>
+        <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#2525ff; vertical-align:middle; margin-right:4px;"></span>CWE</span>
+        <span><span style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#ffff31; vertical-align:middle; margin-right:4px;"></span>CAPEC</span>
+      </div>
     </div>
     <div id="controls" style="display:none;">
       <label>Nodes shown: <span id="node-count-value">0</span> / <span id="node-count-total">0</span></label>
       <input type="range" id="node-slider" min="1" max="1" value="1" />
+      <div id="search-row">
+        <input type="text" id="search-input" list="search-datalist" placeholder="Search node id..." autocomplete="off" />
+        <datalist id="search-datalist"></datalist>
+        <button id="search-btn" class="btn" type="button">Find</button>
+        <button id="clear-btn" class="btn secondary" type="button" title="Clear search">Clear</button>
+      </div>
+      <label style="margin-top:8px;">Relationship depth: <span id="depth-value">1</span> layer<span id="depth-plural"></span></label>
+      <input type="range" id="depth-slider" min="1" max="5" value="1" step="1" />
+      <div id="search-status"></div>
     </div>
   </div>
 
@@ -80,20 +145,35 @@
     const sliderElem = document.getElementById('node-slider');
     const countValueElem = document.getElementById('node-count-value');
     const countTotalElem = document.getElementById('node-count-total');
+    const searchInput = document.getElementById('search-input');
+    const searchBtn = document.getElementById('search-btn');
+    const clearBtn = document.getElementById('clear-btn');
+    const searchStatus = document.getElementById('search-status');
+    const searchDatalist = document.getElementById('search-datalist');
+    const depthSlider = document.getElementById('depth-slider');
+    const depthValue = document.getElementById('depth-value');
+    const depthPlural = document.getElementById('depth-plural');
     const startTime = performance.now();
 
-    // Color generation per group
-    const colorMap = {};
+    // Fixed colors per entity type. Falls back to a stable hash-derived color for any
+    // unexpected group so nothing renders as an invisible/undefined color.
+    const ENTITY_COLORS = {
+      CVE:   '#992f35', // red   — vulnerabilities
+      CWE:   '#2525ff', // blue  — weaknesses
+      CAPEC: '#ffff31', // yellow — attack patterns
+    };
+    const fallbackColorMap = {};
     function getGroupColor(group) {
-      if (!colorMap[group]) {
+      if (ENTITY_COLORS[group]) return ENTITY_COLORS[group];
+      if (!fallbackColorMap[group]) {
         const hash = String(group).split('').reduce((a, b) => {
           a = ((a << 5) - a) + b.charCodeAt(0);
           return a & a;
         }, 0);
         const hue = Math.abs(hash) % 360;
-        colorMap[group] = `hsl(${hue}, 80%, 60%)`;
+        fallbackColorMap[group] = `hsl(${hue}, 80%, 60%)`;
       }
-      return colorMap[group];
+      return fallbackColorMap[group];
     }
 
     fetch('graph_370k.json')
@@ -102,46 +182,69 @@
         const fetchTime = ((performance.now() - startTime) / 1000).toFixed(2);
         statusElem.innerText = `Status: Processing rendering buffers... (${fetchTime}s fetch time)`;
 
+        // Layout tuning: bring nodes closer overall, but jitter to break up dense clumps.
+        // - SCALE  < 1  compresses the whole graph so it looks tighter on screen.
+        // - JITTER  adds a small random offset so overlapping nodes fan out and stay readable.
+        const LAYOUT_SCALE = 0.4;
+        const LAYOUT_JITTER = 200;
+        const rand = () => (Math.random() - 0.5) * 2 * LAYOUT_JITTER;
+
         // 1. Unpack compact JSON nodes: [id, x, y, z, group]
         const allNodes = data.nodes.map(n => ({
           id: n[0],
-          fx: n[1],
-          fy: n[2],
-          fz: n[3],
+          fx: n[1] * LAYOUT_SCALE + rand(),
+          fy: n[2] * LAYOUT_SCALE + rand(),
+          fz: n[3] * LAYOUT_SCALE + rand(),
           color: getGroupColor(n[4])
         }));
 
         // 2. Unpack compact JSON links: [source, target, label]
+        //    NOTE: 3d-force-graph mutates .source/.target into live node object refs after
+        //    the first graphData() call, so we also stash the original id strings on
+        //    `sourceId`/`targetId` for stable adjacency and BFS lookups.
         const allLinks = data.links.map(l => ({
           source: l[0],
           target: l[1],
+          sourceId: l[0],
+          targetId: l[1],
           label: l[2]
         }));
 
         const totalNodes = allNodes.length;
         const totalLinks = allLinks.length;
 
-        // Build a lookup of node index by id, in original order (used as slider ordering).
-        const nodeIndexById = new Map();
-        allNodes.forEach((n, i) => nodeIndexById.set(n.id, i));
+        // Build a lookup of node by id, and a case-insensitive id index for fuzzy matching.
+        const nodeById = new Map();
+        allNodes.forEach(n => nodeById.set(n.id, n));
+        const lowerIdIndex = new Map();
+        allNodes.forEach(n => lowerIdIndex.set(String(n.id).toLowerCase(), n.id));
+
+        // Adjacency index: id -> array of links touching it. Built once, reused per search.
+        const adjacency = new Map();
+        for (const l of allLinks) {
+          if (!adjacency.has(l.sourceId)) adjacency.set(l.sourceId, []);
+          if (!adjacency.has(l.targetId)) adjacency.set(l.targetId, []);
+          adjacency.get(l.sourceId).push(l);
+          adjacency.get(l.targetId).push(l);
+        }
 
         // 3. Initialize Graph
         const Graph = ForceGraph3D()(document.getElementById('3d-graph'))
-          .nodeResolution(4)
-          .nodeRelSize(2)
+          .nodeResolution(8)
+          .nodeRelSize(6)
           .nodeColor(node => node.color)
           .linkOpacity(0.2)
           .linkWidth(0.5)
           .cooldownTicks(0)
-          .enableNodeDrag(false)
+          .enableNodeDrag(true)
 
           // --- NODE LABELS (ID rendered on/above the bubble) ---
           .nodeThreeObjectExtend(true)
           .nodeThreeObject(node => {
             const sprite = new SpriteText(node.id);
             sprite.color = '#ffffff';
-            sprite.textHeight = 4;
-            sprite.position.y = 4;
+            sprite.textHeight = 5;
+            sprite.position.y = 10;
             return sprite;
           })
 
@@ -150,7 +253,7 @@
           .linkThreeObject(link => {
             const sprite = new SpriteText(link.label);
             sprite.color = 'rgba(200, 200, 200, 0.85)';
-            sprite.textHeight = 2.5;
+            sprite.textHeight = 5;
             return sprite;
           })
           .linkPositionUpdate((sprite, { start, end }) => {
@@ -160,13 +263,22 @@
             Object.assign(sprite.position, middlePos);
           });
 
+        let searchActive = false;
+        let focusedNodeId = null;
+
+        // Produce fresh link records with string source/target so 3d-force-graph
+        // re-resolves endpoints against whichever node set we're currently rendering.
+        function cloneLinks(links) {
+          return links.map(l => ({ source: l.sourceId, target: l.targetId, label: l.label }));
+        }
+
         function updateGraph(nodeCount) {
           const n = Math.max(1, Math.min(totalNodes, nodeCount | 0));
           const nodesSubset = allNodes.slice(0, n);
           const visibleIds = new Set(nodesSubset.map(node => node.id));
-          const linksSubset = allLinks.filter(l => visibleIds.has(l.source) && visibleIds.has(l.target));
+          const linksSubset = allLinks.filter(l => visibleIds.has(l.sourceId) && visibleIds.has(l.targetId));
 
-          Graph.graphData({ nodes: nodesSubset, links: linksSubset });
+          Graph.graphData({ nodes: nodesSubset, links: cloneLinks(linksSubset) });
 
           countValueElem.textContent = n.toLocaleString();
           statsElem.innerHTML = `
@@ -175,12 +287,144 @@
           `;
         }
 
-        // Configure slider: 1 .. totalNodes, default = min(1000, totalNodes)
-        const initialCount = Math.min(1000, totalNodes);
+        // Resolve a search query to an exact node id (exact match, then case-insensitive,
+        // then unique prefix match). Returns null if no unambiguous match.
+        function resolveNodeId(query) {
+          const q = query.trim();
+          if (!q) return null;
+          if (nodeById.has(q)) return q;
+          const lower = q.toLowerCase();
+          if (lowerIdIndex.has(lower)) return lowerIdIndex.get(lower);
+          const prefixMatches = [];
+          for (const [lid, realId] of lowerIdIndex) {
+            if (lid.startsWith(lower)) {
+              prefixMatches.push(realId);
+              if (prefixMatches.length > 5) break;
+            }
+          }
+          return prefixMatches.length === 1 ? prefixMatches[0] : null;
+        }
+
+        // Hard cap on how many nodes any search/depth view can pull in.
+        // Keeps the browser responsive regardless of how many layers the user requests.
+        const MAX_FOCUSED_NODES = 1000;
+
+        // BFS from a root id up to `depth` layers, capped at MAX_FOCUSED_NODES total nodes.
+        // Returns { nodeIds:Set, links:Array, actualDepth:number, capped:boolean }.
+        //   actualDepth = how many layers we were actually able to fully expand.
+        //   capped      = true if the node budget forced us to stop early.
+        function collectNeighborhood(rootId, depth) {
+          const nodeIds = new Set([rootId]);
+          const linkSet = new Set();
+          let frontier = [rootId];
+          let capped = false;
+          let actualDepth = 0;
+
+          outer: for (let d = 0; d < depth && frontier.length; d++) {
+            const next = [];
+            for (const id of frontier) {
+              const incident = adjacency.get(id) || [];
+              for (const l of incident) {
+                if (linkSet.has(l)) continue;
+                const other = l.sourceId === id ? l.targetId : l.sourceId;
+                // Only add a new node if we still have budget; but we can always add
+                // links between nodes already in the set (they close cycles within depth).
+                if (!nodeIds.has(other)) {
+                  if (nodeIds.size >= MAX_FOCUSED_NODES) {
+                    capped = true;
+                    continue; // skip this link too — it would introduce an unrendered endpoint
+                  }
+                  nodeIds.add(other);
+                  next.push(other);
+                }
+                linkSet.add(l);
+              }
+              if (capped) break outer;
+            }
+            actualDepth = d + 1;
+            frontier = next;
+          }
+          return { nodeIds, links: [...linkSet], actualDepth, capped };
+        }
+
+        // When focused on a single node, spread its neighborhood with a larger jitter
+        // so densely-connected nodes don't overlap and their labels stay readable.
+        const SEARCH_JITTER = 100;
+        const searchRand = () => (Math.random() - 0.5) * 2 * SEARCH_JITTER;
+
+        function renderFocused(nodeId, depth, animateCamera) {
+          const center = nodeById.get(nodeId);
+          const { nodeIds, links, actualDepth, capped } = collectNeighborhood(nodeId, depth);
+
+          // Build display copies of nodes with extra jitter around their base positions.
+          // Copies (not the originals) so we don't corrupt the slider-view layout.
+          const nodesSubset = [...nodeIds].map(id => {
+            const orig = nodeById.get(id);
+            if (!orig) return null;
+            if (id === nodeId) {
+              // Keep the focused node exactly at its base position so the camera framing is stable.
+              return { ...orig };
+            }
+            return {
+              ...orig,
+              fx: orig.fx + searchRand(),
+              fy: orig.fy + searchRand(),
+              fz: orig.fz + searchRand(),
+            };
+          }).filter(Boolean);
+
+          Graph.graphData({ nodes: nodesSubset, links: cloneLinks(links) });
+
+          searchActive = true;
+          focusedNodeId = nodeId;
+          const cappedNote = capped ? ` — capped at ${MAX_FOCUSED_NODES} nodes` : '';
+          searchStatus.style.color = capped ? '#ffaa66' : '#00ffcc';
+          searchStatus.textContent = `Found "${nodeId}" — depth ${depth}${cappedNote}: ${links.length} relationship${links.length === 1 ? '' : 's'}, ${nodesSubset.length - 1} neighbor${nodesSubset.length - 1 === 1 ? '' : 's'}.`;
+          countValueElem.textContent = nodesSubset.length.toLocaleString();
+          statsElem.innerHTML = `
+            Focused: <b>${nodeId}</b> (depth ${depth}${capped ? `, cap reached at layer ${actualDepth + 1}` : ''})<br>
+            Nodes: <b>${nodesSubset.length.toLocaleString()}</b> / ${MAX_FOCUSED_NODES} max<br>
+            Links: <b>${links.length.toLocaleString()}</b>
+          `;
+
+          if (animateCamera && center) {
+            const distance = 120;
+            const distRatio = 1 + distance / Math.hypot(center.fx || 1, center.fy || 1, center.fz || 1);
+            Graph.cameraPosition(
+              { x: (center.fx || 0) * distRatio, y: (center.fy || 0) * distRatio, z: (center.fz || 0) * distRatio },
+              { x: center.fx || 0, y: center.fy || 0, z: center.fz || 0 },
+              1200
+            );
+          }
+        }
+
+        function showNeighborhood(query) {
+          const nodeId = resolveNodeId(query);
+          if (!nodeId) {
+            searchStatus.style.color = '#ff8888';
+            searchStatus.textContent = `No node matches "${query}".`;
+            return;
+          }
+          renderFocused(nodeId, +depthSlider.value, true);
+        }
+
+        function clearSearch() {
+          searchActive = false;
+          focusedNodeId = null;
+          searchInput.value = '';
+          searchStatus.textContent = '';
+          updateGraph(+sliderElem.value);
+        }
+
+        // Configure slider: 1 .. min(MAX_SLIDER_NODES, totalNodes). Hard cap prevents
+        // the browser from trying to render the full 370k node dataset at once.
+        const MAX_SLIDER_NODES = 1000;
+        const sliderMax = Math.min(MAX_SLIDER_NODES, totalNodes);
+        const initialCount = Math.min(500, sliderMax);
         sliderElem.min = 1;
-        sliderElem.max = totalNodes;
+        sliderElem.max = sliderMax;
         sliderElem.value = initialCount;
-        countTotalElem.textContent = totalNodes.toLocaleString();
+        countTotalElem.textContent = sliderMax.toLocaleString();
         controlsElem.style.display = 'block';
 
         // Debounce slider input so dragging doesn't thrash the renderer.
@@ -188,7 +432,46 @@
         sliderElem.addEventListener('input', () => {
           countValueElem.textContent = (+sliderElem.value).toLocaleString();
           clearTimeout(sliderTimer);
-          sliderTimer = setTimeout(() => updateGraph(+sliderElem.value), 120);
+          sliderTimer = setTimeout(() => {
+            searchActive = false;
+            searchStatus.textContent = '';
+            updateGraph(+sliderElem.value);
+          }, 120);
+        });
+
+        // Search wiring.
+        const runSearch = () => showNeighborhood(searchInput.value);
+        searchBtn.addEventListener('click', runSearch);
+        searchInput.addEventListener('keydown', e => {
+          if (e.key === 'Enter') { e.preventDefault(); runSearch(); }
+        });
+        clearBtn.addEventListener('click', clearSearch);
+
+        // Depth slider: re-runs BFS on the current focused node when moved.
+        let depthTimer = null;
+        depthSlider.addEventListener('input', () => {
+          const d = +depthSlider.value;
+          depthValue.textContent = d;
+          depthPlural.textContent = d === 1 ? '' : 's';
+          if (!searchActive || !focusedNodeId) return;
+          clearTimeout(depthTimer);
+          depthTimer = setTimeout(() => renderFocused(focusedNodeId, d, false), 120);
+        });
+
+        // Lightweight autocomplete: populate <datalist> with prefix matches (capped).
+        searchInput.addEventListener('input', () => {
+          const q = searchInput.value.trim().toLowerCase();
+          searchDatalist.innerHTML = '';
+          if (q.length < 2) return;
+          let count = 0;
+          for (const [lid, realId] of lowerIdIndex) {
+            if (lid.includes(q)) {
+              const opt = document.createElement('option');
+              opt.value = realId;
+              searchDatalist.appendChild(opt);
+              if (++count >= 20) break;
+            }
+          }
         });
 
         updateGraph(initialCount);
