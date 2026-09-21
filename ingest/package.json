@@ -1,0 +1,21 @@
+{
+  "name": "security-kg-graph",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "docker:build": "docker compose build",
+    "docker:run": "docker compose run --rm app",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@duckdb/node-api": "^1.5.5-r.5",
+    "dotenv": "^18.0.1",
+    "neo4j-driver": "^5.24.0"
+  }
+}

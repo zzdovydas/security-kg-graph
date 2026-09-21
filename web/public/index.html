@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Security Knowledge Graph</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Security Knowledge Graph</h1>
+        <p class="subtitle">Ask a question about CVEs, CWEs or CAPECs.</p>
+      </header>
+
+      <form id="ask-form" autocomplete="off">
+        <textarea
+          id="question"
+          name="question"
+          rows="3"
+          placeholder="e.g. Which CWEs are children of CWE-79?"
+          required
+        ></textarea>
+        <div class="form-actions">
+          <button type="submit" id="submit-btn">Ask</button>
+          <button type="button" id="clear-btn" class="link">Clear history</button>
+        </div>
+      </form>
+
+      <div id="status" class="status" hidden></div>
+
+      <section id="history" aria-live="polite"></section>
+
+      <button type="button" id="load-more-btn" class="link" hidden>Load more</button>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

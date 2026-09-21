@@ -1,0 +1,78 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: security-kg-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-neo4jpassword}
+      NEO4J_server_memory_heap_initial__size: 4G
+      NEO4J_server_memory_heap_max__size: 4G
+      NEO4J_server_memory_pagecache_size: 4G
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  app:
+    build:
+      context: ./ingest
+      dockerfile: Dockerfile
+    image: security-kg-graph:latest
+    container_name: security-kg-graph
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATASET_DIR: /app/dataset
+      NEO4J_URI: bolt://neo4j:7687
+    volumes:
+      # Mount the dataset from the host so large parquet files don't need to be
+      # rebuilt into the image every time they change.
+      - ./ingest/dataset:/app/dataset:ro
+    command: ["node", "index.js"]
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    image: security-kg-graph-web:latest
+    container_name: security-kg-web
+    restart: unless-stopped
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      NEO4J_URI: bolt://localhost:7687
+      OLLAMA_URL: http://localhost:11434
+      WEB_PORT: 3000
+    network_mode: host
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: security-kg-nginx
+    restart: unless-stopped
+    depends_on:
+      - web
+    ports:
+      - "${NGINX_PORT:-5123}:5000"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs:/var/log/nginx
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  neo4j_data:
+  neo4j_logs:

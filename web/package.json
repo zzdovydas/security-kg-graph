@@ -1,0 +1,14 @@
+{
+  "name": "security-kg-graph-web",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.1",
+    "express": "^4.21.2",
+    "neo4j-driver": "^5.24.0"
+  }
+}
