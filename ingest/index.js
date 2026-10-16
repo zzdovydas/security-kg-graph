@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
 import { DuckDBInstance } from '@duckdb/node-api';
 import { Neo4jWriter } from './Neo4jWriter.js';
+import { PostgresWriter } from './PostgresWriter.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,40 +20,99 @@ const DATASETS = [
   { name: 'cve', file: 'cve.parquet' },
 ];
 
-async function getDatasetMetadata(conn, { name, file }) {
-    const filePath = path.join(DATASET_DIR, file);
-  
-    // 1. Column Names (DESCRIBE outputs column names in the first column of each row)
-    const schemaReader = await conn.run(`DESCRIBE SELECT * FROM read_parquet('${filePath}')`);
-    const columns = (await schemaReader.getRows()).map((row) => row[0]);
-  
-    // 2. Total Row Count (Extracted instantly from Parquet footer metadata)
-    const countReader = await conn.run(`SELECT count(*) FROM read_parquet('${filePath}')`);
-    const numRows = Number((await countReader.getRows())[0][0]);
-  
-    console.log(`\n=== ${name.toUpperCase()} ===`);
-    console.log(`  path       : ${filePath}`);
-    console.log(`  rows       : ${numRows.toLocaleString()}`);
-    console.log(`  columns(${columns.length}): ${columns.join(', ')}`);
-  
-    return { numRows, columns };
+  async function getSubjects(postgres, dataset) {
+    const result = await postgres.query(
+      `SELECT DISTINCT subject FROM ${quoteIdent(dataset.name)}`,
+    );
+    return result.rows.map((row) => row.subject);
   }
 
-  async function readDataset(conn, { name, file }, rowStart = 0, rowEnd) {
-    const filePath = path.join(DATASET_DIR, file);
-  
-    const limitClause = rowEnd !== undefined ? `LIMIT ${rowEnd - rowStart}` : '';
-    const offsetClause = `OFFSET ${rowStart}`;
-  
-    const reader = await conn.runAndReadAll(`
-      SELECT * 
-      FROM read_parquet('${filePath}') 
-      ${limitClause} 
-      ${offsetClause}
+  async function readSubject(postgres, dataset, subject) {
+    const result = await postgres.query(
+      `SELECT * FROM ${quoteIdent(dataset.name)} WHERE subject = $1`,
+      [subject],
+    );
+    return result.rows;
+  }
+
+  function quoteIdent(name) {
+    return `"${String(name).replace(/"/g, '""')}"`;
+  }
+
+  function renderProgress(label, current, total) {
+    const width = 20;
+    const ratio = total === 0 ? 1 : current / total;
+    const filled = Math.round(width * ratio);
+    const bar = '#'.repeat(filled) + '-'.repeat(width - filled);
+    const percent = Math.round(ratio * 100);
+    process.stdout.write(
+      `\r${label} [${bar}] ${current}/${total} ${percent}%`,
+    );
+    if (current >= total) process.stdout.write('\n');
+  }
+
+  const sqlString = (value) => `'${String(value).replace(/'/g, "''")}'`;
+  const BATCH_SIZE = Number.parseInt(process.env.POSTGRES_BATCH_SIZE ?? '5000', 10);
+
+  async function countParquetRows(conn, filePath) {
+    const result = await conn.runAndReadAll(
+      `SELECT count(*) AS n FROM read_parquet(${sqlString(filePath)})`,
+    );
+    return Number(result.getRowObjectsJS()[0].n);
+  }
+
+  async function readParquetBatch(conn, filePath, rowStart, rowEnd) {
+    const result = await conn.runAndReadAll(`
+      SELECT subject, predicate, object, source, object_type, meta
+      FROM read_parquet(${sqlString(filePath)}, file_row_number = true)
+      WHERE file_row_number >= ${rowStart}
+        AND file_row_number < ${rowEnd}
     `);
-  
-    // Returns array of mapped objects: [{ col1: val1, col2: val2 }, ...]
-    return reader.getRowObjects();
+    return result.getRowObjectsJS();
+  }
+
+  async function importParquetToPostgres(conn, postgres) {
+    for (const dataset of DATASETS) {
+      const filePath = path.join(DATASET_DIR, dataset.file);
+      if (!fs.existsSync(filePath)) {
+        console.warn(`[script] ${dataset.file} not found — skipping`);
+        continue;
+      }
+
+      const table = quoteIdent(dataset.name);
+      const indexName = quoteIdent(`${dataset.name}_subject_idx`);
+
+      await postgres.query(`DROP TABLE IF EXISTS ${table}`);
+      await postgres.query(`
+        CREATE TABLE ${table} (
+          subject TEXT,
+          predicate TEXT,
+          object TEXT,
+          source TEXT,
+          object_type TEXT,
+          meta TEXT
+        )
+      `);
+      await postgres.query(`CREATE INDEX ${indexName} ON ${table} (subject)`);
+      console.log(`[script/postgres] created table ${dataset.name} with index on subject`);
+
+      const started = performance.now();
+      const total = await countParquetRows(conn, filePath);
+      let written = 0;
+
+      for (let rowStart = 0; rowStart < total; rowStart += BATCH_SIZE) {
+        const rowEnd = Math.min(rowStart + BATCH_SIZE, total);
+        const rows = await readParquetBatch(conn, filePath, rowStart, rowEnd);
+        await postgres.writeBatch(dataset.name, rows);
+        written += rows.length;
+        console.log(
+          `[script/postgres] ${dataset.name}: wrote ${written.toLocaleString()} / ${total.toLocaleString()} rows`,
+        );
+      }
+
+      const seconds = ((performance.now() - started) / 1000).toFixed(1);
+      console.log(`[script/postgres] ${dataset.name}: ${written.toLocaleString()} rows in ${seconds}s`);
+    }
   }
 
 async function main() {
@@ -61,54 +121,37 @@ async function main() {
   const db = await DuckDBInstance.create();
   const conn = await db.connect();
 
-  const writer = new Neo4jWriter();
-  await writer.connect();
-  await writer.ensureConstraints();
+  const postgres = new PostgresWriter();
+  await postgres.connect();
 
-  for (const ds of DATASETS) {
+  try {
+    // await importParquetToPostgres(conn, postgres);
+
+    const writer = new Neo4jWriter();
+    await writer.connect();
     try {
-      const metadata = await getDatasetMetadata(conn, ds);
-      const total = Number(metadata.numRows);
-      let rowStart = 0;
-      let iterations = 0;
-      while (rowStart < total) {
-        const rows = await readDataset(conn, ds, rowStart, rowStart + 10000);
-        rowStart += 10000;
-        await writer.writeNodes(ds.name.toUpperCase(), rows);
-        console.log(`[${ds.name}] wrote ${rows.length} rows`);
-        iterations++;
-        console.log(`[${ds.name}] wrote ${total} rows. ${iterations*10000} out of ${total} total rows`);
-        // for (const row of rows) {
-        //     await writer.writeNode(ds.name.toUpperCase(), row);
-        // }
-      }
-    } catch (err) {
-      console.error(`[${ds.name}] failed:`, err?.stack ?? err);
-      process.exitCode = 1;
-    }
-  }
+      for (const dataset of DATASETS) {
+        try {
+          const subjects = await getSubjects(postgres, dataset);
+          let done = 0;
+          renderProgress(dataset.name, done, subjects.length);
 
-  console.log(`writing relationships`);
-
-  for (const ds of DATASETS) {
-    try {
-      const metadata = await getDatasetMetadata(conn, ds);
-      const total = Number(metadata.numRows);
-      let rowStart = 0;
-      let iterations = 0;
-      while (rowStart < total) {
-        const rows = await readDataset(conn, ds, rowStart, rowStart + 2000);
-        rowStart += 2000;
-        for (const row of rows) {
-          await writer.writeRelationship(row);
+          for (const subject of subjects) {
+            const rows = await readSubject(postgres, dataset, subject);
+            await writer.writeEntity(dataset, rows);
+            done++;
+            renderProgress(dataset.name, done, subjects.length);
+          }
+        } catch (err) {
+          console.error(`[${dataset.name}] failed:`, err?.stack ?? err);
+          process.exitCode = 1;
         }
-        iterations++;
-        console.log(`[${ds.name}] wrote ${total} relationships. ${iterations*2000} out of ${total} total rows`);
       }
-    } catch (err) {
-      console.error(`[${ds.name}] failed:`, err?.stack ?? err);
-      process.exitCode = 1;
+    } finally {
+      await writer.close();
     }
+  } finally {
+    await postgres.close();
   }
 }
 

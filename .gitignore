@@ -4,6 +4,14 @@ npm-debug.log*
 .env
 .env.local
 
+.venv/
+venv/
+env/
+ENV/
+
+__pycache__/
+*.py[cod]
+
 .DS_Store
 
 logs/*

@@ -82,62 +82,15 @@ export class Neo4jWriter {
     });
   }
 
-  async writeNodes(entity, records) {
-    if (!this.session) {
-      throw new Error('Neo4jWriter is not connected. Call connect() first.');
-    }
-    if (!records || records.length === 0) return;
+  async handleIfRelationship(row) {
 
-    const entityLabel = records[0].source.toUpperCase();
-
-    // 1. Group records by predicate, as Cypher cannot parameterize property keys directly
-    const batchesByPredicate = {};
-    for (const record of records) {
-      const predicate = String(record.predicate);
-      if (!batchesByPredicate[predicate]) {
-        batchesByPredicate[predicate] = [];
-      }
-      
-      batchesByPredicate[predicate].push({
-        subject: String(record.subject),
-        object: String(record.object),
-        source: record.source ?? null,
-        object_type: record.object_type ?? null,
-        meta: record.meta ?? null,
-      });
-    }
-
-    console.log(`[${entity}] writing ${Object.keys(batchesByPredicate).length} predicates`);
-    // 2. Execute one UNWIND query per predicate group
-    for (const [predicate, batch] of Object.entries(batchesByPredicate)) {
-      const propertyName = toRelationshipType(predicate).toLowerCase();
-
-      const cypher = `
-        UNWIND $batch AS row
-        MERGE (s:${entityLabel} {id: row.subject})
-        SET s.${propertyName} = row.object,
-            s.${propertyName}_source = row.source,
-            s.${propertyName}_object_type = row.object_type,
-            s.${propertyName}_meta = row.meta
-      `;
-      console.log(`Successfully [${entity}] wrote ${Object.keys(batchesByPredicate).length} predicates`);
-
-      await this.session.run(cypher, { batch });
-    }
-  }
-
-  async writeRelationship(record) {
-    if (!this.session) {
-      throw new Error('Neo4jWriter is not connected. Call connect() first.');
-    }
-
-    const subject = String(record.subject);
-    const object = String(record.object);
-    const predicate = String(record.predicate).toLowerCase();
+    const subject = String(row.subject);
+    const object = String(row.object);
+    const predicate = String(row.predicate).toLowerCase();
     const relationshipType = toRelationshipType(predicate).toUpperCase();
 
-    if (!predicate.startsWith('child-of') && !predicate.startsWith('parent-of') && !predicate.startsWith('related-attack-pattern')
-    && !predicate.startsWith('related-weakness')) {
+    if (!predicate.startsWith('child-of') && !predicate.startsWith('parent-of')
+      && !predicate.startsWith('related-attack-pattern') && !predicate.startsWith('related-weakness') && !predicate.startsWith('can-precede')) {
       return false;
     }
     
@@ -145,38 +98,113 @@ export class Neo4jWriter {
     let child = subject.split('-')[0];
     let parent = object.split('-')[0];
 
-    let cypher = `
-      MERGE (s:${child} {id: $subject})
-      MERGE (o:${parent} {id: $object})
-      MERGE (s)-[r:CHILD_OF]->(o)
-    `;
+    let cypher;
 
     // Case when parent of relationship is in the subject
-    if (predicate.startsWith('parent-of')) {
+    if (predicate.startsWith('child-of')) {
+
       cypher = `
-      MERGE (s:${parent} {id: $subject})
-      MERGE (o:${child} {id: $object})
-      MERGE (s)-[r:PARENT_OF]->(o)
-    `;
+      MERGE (s:${child} {id: $subject})
+      MERGE (o:${parent} {id: $object})
+      MERGE (s)-[r:CHILD_OF]->(o)`;
+      
+      await this.session.run(cypher, {
+        subject,
+        object,
+      });
+
+      cypher = `
+      MERGE (s:${child} {id: $subject})
+      MERGE (o:${parent} {id: $object})
+      MERGE (o)-[r:PARENT_OF]->(s)`;
+
+      await this.session.run(cypher, {
+        subject,
+        object,
+      });
+
     } else {
 
       cypher = `
       MERGE (s:${child} {id: $subject})
       MERGE (o:${parent} {id: $object})
-      MERGE (s)-[r:${relationshipType}]->(o)
-    `;
+      MERGE (s)-[r:${relationshipType}]-(o)`;
+
+      await this.session.run(cypher, {
+        subject,
+        object,
+      });
+      
     }
 
-    await this.session.run(cypher, {
-      subject,
-      object,
-    });
-
     return true;
+  }
+
+  async writeEntity(dataset, rows) {
+    if (!this.session) {
+      throw new Error('Neo4jWriter is not connected. Call connect() first.');
+    }
+    if (!rows || rows.length === 0) return;
+
+    // const subject = String(rows[0].subject);
+    // const label = dataset.name.toUpperCase();
+    // const props = buildEntityProperties(rows);
+
+    // await this.session.run(
+    //   `MERGE (s:${label} {id: $subject})
+    //    SET s += $props`,
+    //   { subject, props },
+    // );
+
+    for (const row of rows) {
+      await this.handleIfRelationship(row);
+    }
+  }
+
+  async writeCweParentOfEdges(edges, batchSize = 500) {
+    if (!this.session) {
+      throw new Error('Neo4jWriter is not connected. Call connect() first.');
+    }
+    if (!edges || edges.length === 0) return 0;
+
+    const cypher = `
+      UNWIND $batch AS row
+      MERGE (parent:CWE {id: row.parentId})
+      MERGE (child:CWE  {id: row.childId})
+      MERGE (s)-[r:PARENT_OF]->(o)
+      
+    `;
+
+    let written = 0;
+    for (let i = 0; i < edges.length; i += batchSize) {
+      const batch = edges.slice(i, i + batchSize).map((e) => ({
+        childId: String(e.childId),
+        parentId: String(e.parentId),
+      }));
+      await this.session.run(cypher, { batch });
+      written += batch.length;
+    }
+    return written;
   }
 }
 
 function toRelationshipType(predicate) {
   const cleaned = predicate.replace(/[^A-Za-z0-9_]/g, '_').toUpperCase();
   return cleaned.length > 0 ? cleaned : 'RELATED_TO';
+}
+
+function buildEntityProperties(rows) {
+  const props = {};
+
+  for (const [index, row] of rows.entries()) {
+    const key = `${toRelationshipType(String(row.predicate)).toLowerCase()}_${index}`;
+    props[key] = row.object == null ? null : String(row.object);
+
+    const meta = row.meta ?? '';
+    if (meta !== '') {
+      props[`meta_${key}`] = String(meta);
+    }
+  }
+
+  return props;
 }
